@@ -1,20 +1,12 @@
+from collections import Counter, defaultdict
 import streamlit as st
 from spotipy import Spotify
 from spotipy.cache_handler import CacheHandler
 from spotipy.oauth2 import SpotifyOAuth
-import os
-from collections import Counter, defaultdict
-# from dotenv import load_dotenv
-#
-# load_dotenv()
 
 CLIENT_ID = st.secrets["SPOTIPY_CLIENT_ID"]
 CLIENT_SECRET = st.secrets["SPOTIPY_CLIENT_SECRET"]
 REDIRECT_URI = st.secrets["SPOTIPY_REDIRECT_URI"]
-
-# CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
-# CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
-# REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI")
 
 
 class StreamlitCacheHandler(CacheHandler):
@@ -37,8 +29,9 @@ def get_auth_manager():
     )
 
 
-def get_spotify_client():
-    return Spotify(auth_manager=get_auth_manager())
+def create_spotify_client():
+    auth_manager = get_auth_manager()
+    return Spotify(auth_manager=auth_manager)
 
 
 def fetch_all_saved_tracks(sp):
@@ -92,11 +85,6 @@ def cached_fetch_tracks_and_genres(tracks, track_genres):
     return tracks, track_genres
 
 
-def create_spotify_client():
-    auth_manager = get_auth_manager()
-    return Spotify(auth_manager=auth_manager)
-
-
 def filter_tracks_by_selected_genres(tracks, track_genres, selected_genres, mode="or"):
     selected_genres = [g.lower() for g in selected_genres]
     filtered_tracks = []
@@ -143,21 +131,24 @@ st.markdown(
 st.markdown("---")
 
 auth_manager = get_auth_manager()
+st.error("1")
 
-# --- STEP 1: Handle the redirect back from Spotify (with ?code=...) ---
+# --- STEP 1: Handle redirect back from Spotify ---
 if "code" in st.query_params:
     try:
         sp = Spotify(auth_manager=auth_manager)
         st.session_state["authenticated"] = True
-        st.experimental_rerun()
-    except Exception as e:
+        st.rerun()
+    except Exception:
         st.error("Authentication failed.")
+        st.error("2")
         st.stop()
 
-# --- STEP 2: If token already cached, authenticate automatically ---
+# --- STEP 2: If token cached, authenticate automatically ---
 elif auth_manager.get_cached_token():
     st.session_state["authenticated"] = True
     sp = Spotify(auth_manager=auth_manager)
+    st.error("3")
 
 # --- STEP 3: If not authenticated yet, show login button ---
 if not st.session_state.get("authenticated", False):
@@ -166,10 +157,13 @@ if not st.session_state.get("authenticated", False):
         f"<a href='{auth_url}' target='_self'><button style='margin-top:20px;'>Log in to Spotify</button></a>",
         unsafe_allow_html=True
     )
-    st.stop()   # do not continue until authenticated
+    st.error("4")
+    st.stop()
 
+st.error("5")
 # --- IF WE REACH THIS POINT: user is authenticated ---
 sp = Spotify(auth_manager=auth_manager)
+st.error("6")
 
 # Fetch cached tracks & genres
 with st.spinner("Loading your liked songs and genres…"):
@@ -220,9 +214,6 @@ if st.button("Generate Playlist"):
                 st.markdown(f"[Open in Spotify](https://open.spotify.com/playlist/{playlist['id']})")
             else:
                 st.warning("No tracks matched the selected genres.")
-
-
-
 
 # Footer
 st.markdown("---")
