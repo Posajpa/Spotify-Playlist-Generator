@@ -159,7 +159,7 @@ elif not st.session_state["authenticated"]:
 if not st.session_state["authenticated"]:
     auth_url = auth_manager.get_authorize_url()
     st.markdown(
-        f"<a href='{auth_url}' target='_self'><button style='margin-top:20px;'>Log in to Spotify</button></a>",
+        f"<a href='{auth_url}' target='_blank'><button style='margin-top:20px;'>Log in to Spotify</button></a>",
         unsafe_allow_html=True
     )
     st.stop()
