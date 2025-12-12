@@ -8,9 +8,9 @@ from collections import Counter, defaultdict
 #
 # load_dotenv()
 
-st.write("CLIENT_ID:", st.secrets["SPOTIPY_CLIENT_ID"])
-st.write("CLIENT_SECRET:", st.secrets["SPOTIPY_CLIENT_SECRET"])
-st.write("REDIRECT_URI:", st.secrets["SPOTIPY_REDIRECT_URI"])
+CLIENT_ID = st.secrets["SPOTIPY_CLIENT_ID"]
+CLIENT_SECRET = st.secrets["SPOTIPY_CLIENT_SECRET"]
+REDIRECT_URI = st.secrets["SPOTIPY_REDIRECT_URI"]
 
 # CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 # CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
