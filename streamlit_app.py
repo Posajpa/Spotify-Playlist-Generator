@@ -1,27 +1,9 @@
-# streamlit_spotify_playlist_app.py
-# Smart Spotify Playlist Generator - Streamlit + Spotipy
-# Single-file Streamlit app you can run locally or deploy.
-# Instructions (short):
-# 1) Create a Spotify app at https://developer.spotify.com/dashboard
-#    - Add Redirect URI: http://localhost:8501 or your deployed URL + "/"
-# 2) Set the CLIENT_ID and CLIENT_SECRET below or export as env vars
-#    - SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET
-# 3) Install requirements: pip install -r requirements.txt
-# 4) Run: streamlit run streamlit_spotify_playlist_app.py
-
-# Requirements (put in requirements.txt):
-# streamlit
-# spotipy
-# pandas
-# numpy
-
 import streamlit as st
-import spotipy
+from spotipy import Spotify
+from spotipy.cache_handler import CacheHandler
 from spotipy.oauth2 import SpotifyOAuth
-import pandas as pd
-import time
 import os
-from typing import List
+from collections import Counter, defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,39 +12,35 @@ CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI")
 
-SCOPE = (
-    "user-library-read playlist-modify-private playlist-modify-public user-read-private"
-)
-CACHE_PATH = ".cache"
 
-# -------------------------
-# Helper functions
-# -------------------------
+class StreamlitCacheHandler(CacheHandler):
+    def get_cached_token(self):
+        return st.session_state.get("spotipy_token")
 
-def get_spotify_oauth():
+    def save_token_to_cache(self, token_info):
+        st.session_state["spotipy_token"] = token_info
+
+
+def get_auth_manager():
     return SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
-        scope=SCOPE,
-        cache_path=CACHE_PATH,
+        scope="user-library-read playlist-modify-private playlist-modify-public user-read-private",
         show_dialog=True,
+        cache_path=None,
+        cache_handler=StreamlitCacheHandler()
     )
 
 
-def get_token_from_code(code: str):
-    sp_oauth = get_spotify_oauth()
-    token_info = sp_oauth.get_access_token(code)
-    return token_info
+def get_spotify_client():
+    return Spotify(auth_manager=get_auth_manager())
 
 
-@st.cache_data
-def fetch_all_saved_tracks(sp: spotipy.Spotify) -> List[dict]:
-    """Fetch all saved (liked) tracks for the current user."""
+def fetch_all_saved_tracks(sp):
     limit = 50
     offset = 0
     all_items = []
-
     while True:
         res = sp.current_user_saved_tracks(limit=limit, offset=offset)
         items = res.get("items", [])
@@ -73,224 +51,176 @@ def fetch_all_saved_tracks(sp: spotipy.Spotify) -> List[dict]:
     return all_items
 
 
-def normalize_text(s: str) -> str:
-    return (s or "").lower()
-
-
-def filter_tracks(tracks: List[dict], keyword: str, min_bpm=None, max_bpm=None, min_dance=None, min_valence=None) -> List[dict]:
-    keyword = normalize_text(keyword)
-    if keyword == "":
-        # if empty keyword, return empty list
-        return []
-
-    filtered = []
-    # We'll batch query audio features to allow BPM/danceability/valence filtering
-    track_ids = [t["track"]["id"] for t in tracks if t.get("track") and t["track"].get("id")]
-
-    # Get audio features in chunks of 100
-    sp = st.session_state.get("sp")
-    features_map = {}
-    for i in range(0, len(track_ids), 100):
-        chunk = track_ids[i:i+100]
-        afs = sp.audio_features(chunk)
-        for af in afs:
-            if af and af.get("id"):
-                features_map[af["id"]] = af
+def get_track_genres(sp, tracks):
+    track_genres = defaultdict(list)
+    all_artist_ids = set()
+    track_artists_map = {}
 
     for item in tracks:
-        track = item["track"]
+        track = item.get("track")
         if not track:
             continue
-        name = normalize_text(track.get("name", ""))
-        artists = ", ".join([a["name"] for a in track.get("artists", [])])
-        artists = normalize_text(artists)
-        album = normalize_text(track.get("album", {}).get("name", ""))
+        tid = track.get("id")
+        artists = track.get("artists", [])
+        artist_ids = [a["id"] for a in artists if a.get("id")]
+        track_artists_map[tid] = artist_ids
+        all_artist_ids.update(artist_ids)
 
-        match = (keyword in name) or (keyword in artists) or (keyword in album)
+    artist_ids = list(all_artist_ids)
+    artist_genres_map = {}
+    for i in range(0, len(artist_ids), 50):
+        chunk = artist_ids[i:i + 50]
+        artists_info = sp.artists(chunk)["artists"]
+        for a in artists_info:
+            artist_genres_map[a["id"]] = a.get("genres", [])
 
-        if match:
-            # check audio features filters
-            af = features_map.get(track.get("id"))
-            if af is None:
-                # if no audio features, include it (or you may skip)
-                filtered.append(track)
-                continue
+    for tid, a_ids in track_artists_map.items():
+        genres = []
+        for aid in a_ids:
+            genres.extend(artist_genres_map.get(aid, []))
+        track_genres[tid] = list(set(genres))
 
-            bpm = af.get("tempo")
-            dance = af.get("danceability")
-            valence = af.get("valence")
-
-            if min_bpm is not None and bpm is not None and bpm < min_bpm:
-                continue
-            if max_bpm is not None and bpm is not None and bpm > max_bpm:
-                continue
-            if min_dance is not None and dance is not None and dance < min_dance:
-                continue
-            if min_valence is not None and valence is not None and valence < min_valence:
-                continue
-
-            filtered.append(track)
-
-    return filtered
+    return track_genres
 
 
-def create_playlist_and_add_tracks(sp: spotipy.Spotify, user_id: str, playlist_name: str, track_uris: List[str], public: bool = False) -> dict:
+@st.cache_data(show_spinner=False)
+def cached_fetch_tracks_and_genres():
+    sp = get_spotify_client()
+    tracks = fetch_all_saved_tracks(sp)
+    track_genres = get_track_genres(sp, tracks)
+    return tracks, track_genres
+
+
+def create_spotify_client():
+    auth_manager = get_auth_manager()
+    return Spotify(auth_manager=auth_manager)
+
+
+def filter_tracks_by_selected_genres(tracks, track_genres, selected_genres, mode="or"):
+    selected_genres = [g.lower() for g in selected_genres]
+    filtered_tracks = []
+
+    for item in tracks:
+        track = item.get("track")
+        if not track:
+            continue
+        tid = track.get("id")
+        genres = [g.lower() for g in track_genres.get(tid, [])]
+        if not genres:
+            continue
+
+        if mode == "or" and any(g in genres for g in selected_genres):
+            filtered_tracks.append(track)
+        elif mode == "and" and all(g in genres for g in selected_genres):
+            filtered_tracks.append(track)
+
+    return filtered_tracks
+
+
+def create_playlist_with_tracks(sp, user_id, playlist_name, tracks_to_add, public=False):
+    uris = [t["uri"] for t in tracks_to_add]
     playlist = sp.user_playlist_create(user=user_id, name=playlist_name, public=public)
     pid = playlist["id"]
-    # add in chunks of 100
-    for i in range(0, len(track_uris), 100):
-        sp.playlist_add_items(pid, track_uris[i : i + 100])
+
+    for i in range(0, len(uris), 100):
+        sp.playlist_add_items(pid, uris[i:i + 100])
+
     return playlist
 
 
 # -------------------------
-# Streamlit UI
+# Streamlit App
 # -------------------------
+st.set_page_config(page_title="Spotify Genre Playlist Generator", layout="centered", page_icon="🎵",
+                   initial_sidebar_state="collapsed")
+# Header
+st.markdown("<h1 style='text-align:center; font-size:32px;'>🎵 Spotify Genre Playlist Generator</h1>",
+            unsafe_allow_html=True)
+st.markdown(
+    "<p style='text-align:center; color:gray; font-size:14px;'>Select your favorite genres from your liked songs and create a playlist instantly.</p>",
+    unsafe_allow_html=True)
+st.markdown("---")
 
-st.set_page_config(page_title="Smart Spotify Playlist Generator", layout="centered")
-st.title("🎛️ Smart Spotify Playlist Generator")
-st.write("Create playlists from your Liked Songs using keywords and audio filters.")
+# Initialize session state for authentication
+if 'authenticated' not in st.session_state:
+    st.session_state['authenticated'] = False
 
-# AUTH
-sp = None
-if "auth_done" not in st.session_state:
-    st.session_state.auth_done = False
+if not st.session_state['authenticated']:
+    st.info("Please log in to Spotify to continue.")
 
-# If we already have token info in cache file, Spotipy will pick it up.
-sp_oauth = get_spotify_oauth()
+    if st.button("Log in to Spotify"):
+        try:
+            sp = get_spotify_client()
+            st.session_state['authenticated'] = True
+            st.rerun()  # Trigger a rerun to move to the main app interface
+        except Exception as e:
+            # Handle potential SpotiPy/OAuth errors here if necessary
+            st.error(f"Authentication failed: {e}")
 
-# Check for code in query params (after redirect from spotify auth)
-params = st.query_params
-code = params.get("code", [None])[0]
+    # Check if a token exists after a redirect
+    auth_manager = get_auth_manager()
+    if auth_manager.get_cached_token() or 'code' in st.query_params:
+        # If a token is in cache or we just returned with a code, try to get the client.
+        try:
+            sp = get_spotify_client()
+            st.session_state['authenticated'] = True
+            st.rerun()
+        except:
+            # Handle case where the token might be expired or invalid
+            st.session_state['authenticated'] = False
 
-if code and not st.session_state.auth_done:
-    try:
-        token_info = get_token_from_code(code)
-        access_token = token_info["access_token"] if isinstance(token_info, dict) else token_info
-        sp = spotipy.Spotify(auth=access_token)
-        st.session_state.sp = sp
-        st.session_state.auth_done = True
-        st.experimental_set_query_params()  # clear query params
-        st.success("Authentication successful — you're connected to Spotify!")
-        time.sleep(0.8)
-        st.experimental_rerun()
-    except Exception as e:
-        st.error("Failed to complete authentication: {}".format(e))
 
-if not st.session_state.get("auth_done"):
-    st.info("You need to connect your Spotify account to use the app.")
-    auth_url = sp_oauth.get_authorize_url()
-    st.markdown(f"[Connect to Spotify]({auth_url})")
-    st.caption("After connecting, Spotify will redirect back to this app. If the redirect doesn't return, copy the URL and paste it here.")
-    # Allow manual paste of redirect URL (fallback)
-    redirect_url_input = st.text_input("If auth didn't finish automatically, paste the redirected URL here (the URL will contain '?code=...'):")
-    if redirect_url_input:
-        # try to extract code
-        import urllib.parse as up
+if st.session_state['authenticated']:
+    # Spotify client
+    sp = get_spotify_client()
 
-        q = up.urlparse(redirect_url_input).query
-        qp = up.parse_qs(q)
-        code_try = qp.get("code", [None])[0]
-        if code_try:
-            try:
-                token_info = get_token_from_code(code_try)
-                access_token = token_info["access_token"] if isinstance(token_info, dict) else token_info
-                sp = spotipy.Spotify(auth=access_token)
-                st.session_state.sp = sp
-                st.session_state.auth_done = True
-                st.success("Authentication successful — you're connected to Spotify!")
-                st.experimental_rerun()
-            except Exception as e:
-                st.error(f"Failed to exchange code: {e}")
+    # Fetch cached tracks & genres
+    with st.spinner("Loading your liked songs and genres…"):
+        tracks, track_genres = cached_fetch_tracks_and_genres()
 
-# If authenticated, create sp client (Spotipy will use cache file if available)
-if st.session_state.get("auth_done"):
-    try:
-        # Try to create Spotify instance using cached credentials
-        oauth = get_spotify_oauth()
-        token_info = oauth.get_cached_token()
-        if token_info is None:
-            # Attempt to refresh automatically (Spotipy handles it) by getting a new token using the oauth object
-            st.warning("Token not found in cache — you may need to re-authenticate.")
+    # Count genres
+    genre_counter = Counter()
+    for genres in track_genres.values():
+        genre_counter.update(genres)
+
+    # Sort & show genres
+    sorted_genres = sorted(genre_counter.items(), key=lambda x: x[1], reverse=True)
+    genre_list = [f"{genre} ({count})" for genre, count in sorted_genres]
+    genre_names = [genre for genre, _ in sorted_genres]
+
+    # Selection & Controls
+    selected_idx = st.multiselect(
+        "Select genres",
+        options=list(range(len(genre_list))),
+        format_func=lambda x: genre_list[x],
+        help="Scrollable list of genres"
+    )
+    selected_genres = [genre_names[i] for i in selected_idx]
+
+    # AND / OR selection
+    mode = st.radio("Match mode", ["or", "and"],
+                    help="OR = Include any of the selected genres, AND = Must be in all the selected genres")
+
+    # Playlist info
+    playlist_name = st.text_input("Playlist name", placeholder="My Rock Playlist")
+    make_public = st.checkbox("Make playlist public?", value=True)
+
+    # Playlist creation
+    if st.button("Generate Playlist"):
+        if not selected_genres:
+            st.error("Please choose at least one genre")
         else:
-            sp = spotipy.Spotify(auth=token_info["access_token"])
-            st.session_state.sp = sp
-    except Exception as e:
-        st.error(f"Error creating Spotify client: {e}")
+            with st.spinner("Filtering tracks and creating playlist…"):
+                filtered = filter_tracks_by_selected_genres(tracks, track_genres, selected_genres, mode)
+                st.write(f"Found {len(filtered)} matching tracks")
 
-if st.session_state.get("sp"):
-    sp = st.session_state.sp
-    user = sp.current_user()
-    st.sidebar.write(f"Logged in as: {user.get('display_name')} ({user.get('id')})")
+                if filtered:
+                    user_id = sp.current_user()["id"]
+                    playlist = create_playlist_with_tracks(sp, user_id, playlist_name, filtered, public=make_public)
+                    st.success(f"Playlist created: {playlist['name']}")
+                    st.markdown(f"[Open in Spotify](https://open.spotify.com/playlist/{playlist['id']})")
+                else:
+                    st.warning("No tracks matched the selected genres.")
 
-    with st.expander("App settings & options", expanded=False):
-        st.write("These settings control how we filter and build playlists.")
-        default_public = False
-        is_public = st.checkbox("Make playlist public?", value=default_public)
-
-    # Main controls
-    st.subheader("Search your Liked Songs")
-    keyword = st.text_input("Keyword (search in track name, artist, album)", value="italian")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        bpm_range = st.slider("BPM range", 0, 220, (0, 220))
-    with col2:
-        dance_min = st.slider("Min danceability (0-1)", 0.0, 1.0, 0.0, step=0.05)
-        valence_min = st.slider("Min valence (0-1, happiness)", 0.0, 1.0, 0.0, step=0.05)
-
-    playlist_name = st.text_input("Playlist name", value=f"{keyword.capitalize()} Playlist (Auto)")
-
-    if st.button("Generate playlist"):
-        if not keyword.strip():
-            st.error("Please enter a keyword.")
-        else:
-            with st.spinner("Fetching your liked songs (this may take a moment)..."):
-                saved = fetch_all_saved_tracks(sp)
-            st.write(f"Total liked songs: {len(saved)}")
-
-            with st.spinner("Filtering songs..."):
-                filtered = filter_tracks(
-                    saved,
-                    keyword,
-                    min_bpm=bpm_range[0] if bpm_range[0] > 0 else None,
-                    max_bpm=bpm_range[1] if bpm_range[1] < 220 else None,
-                    min_dance=dance_min if dance_min > 0 else None,
-                    min_valence=valence_min if valence_min > 0 else None,
-                )
-
-            st.write(f"Found {len(filtered)} matching tracks")
-
-            if len(filtered) == 0:
-                st.info("No tracks matched your filters. Try relaxing filters or a different keyword.")
-            else:
-                # show a preview table
-                df_preview = pd.DataFrame([
-                    {
-                        "name": t.get("name"),
-                        "artists": ", ".join([a["name"] for a in t.get("artists", [])]),
-                        "album": t.get("album", {}).get("name"),
-                        "uri": t.get("uri"),
-                    }
-                    for t in filtered
-                ])
-                st.dataframe(df_preview.head(50))
-
-                if st.button("Create playlist on Spotify with these songs"):
-                    with st.spinner("Creating playlist and adding songs..."):
-                        user_id = user.get("id")
-                        uris = [t.get("uri") for t in filtered]
-                        playlist = create_playlist_and_add_tracks(sp, user_id, playlist_name, uris, public=is_public)
-                        st.success(f"Playlist created: {playlist.get('name')}")
-                        st.markdown(f"Open in Spotify: [Open playlist](https://open.spotify.com/playlist/{playlist.get('id')})")
-
-    st.markdown("---")
-    st.write("Tips:")
-    st.write("- Use short keywords like 'italian', 'reggaeton', 'acoustic', or artist names.")
-    st.write("- Use the BPM / danceability sliders to refine mood or energy.")
-    st.write("- For portfolio: take screenshots of the app, include the GitHub repo and a live demo link.")
-
-else:
-    st.write("Please connect your Spotify account first (left section).")
-
-# EOF
+# Footer
+st.markdown("---")
