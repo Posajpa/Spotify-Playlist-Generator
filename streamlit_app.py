@@ -88,10 +88,7 @@ def get_track_genres(sp, tracks):
 
 
 @st.cache_data(show_spinner=False)
-def cached_fetch_tracks_and_genres():
-    sp = get_spotify_client()
-    tracks = fetch_all_saved_tracks(sp)
-    track_genres = get_track_genres(sp, tracks)
+def cached_fetch_tracks_and_genres(tracks, track_genres):
     return tracks, track_genres
 
 
@@ -145,42 +142,39 @@ st.markdown(
     unsafe_allow_html=True)
 st.markdown("---")
 
-# Initialize session state for authentication
-if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = False
+auth_manager = get_auth_manager()
 
-if not st.session_state['authenticated']:
+# Handle redirect with ?code=... FIRST
+if 'code' in st.query_params:
+    try:
+        sp = Spotify(auth_manager=auth_manager)
+        st.session_state['authenticated'] = True
+        st.rerun()
+    except:
+        st.session_state['authenticated'] = False
+
+# If token cached, authenticate immediately
+elif auth_manager.get_cached_token():
+    sp = Spotify(auth_manager=auth_manager)
+    st.session_state['authenticated'] = True
+
+# Show login button if not authenticated
+if not st.session_state.get('authenticated', False):
     st.info("Please log in to Spotify to continue.")
-
     if st.button("Log in to Spotify"):
-        try:
-            sp = get_spotify_client()
-            st.session_state['authenticated'] = True
-            st.rerun()  # Trigger a rerun to move to the main app interface
-        except Exception as e:
-            # Handle potential SpotiPy/OAuth errors here if necessary
-            st.error(f"Authentication failed: {e}")
-
-    # Check if a token exists after a redirect
-    auth_manager = get_auth_manager()
-    if auth_manager.get_cached_token() or 'code' in st.query_params:
-        # If a token is in cache or we just returned with a code, try to get the client.
-        try:
-            sp = get_spotify_client()
-            st.session_state['authenticated'] = True
-            st.rerun()
-        except:
-            # Handle case where the token might be expired or invalid
-            st.session_state['authenticated'] = False
+        auth_url = auth_manager.get_authorize_url()
+        st.markdown(f"[Click here to log in]({auth_url})")
+    st.stop()
 
 
 if st.session_state['authenticated']:
-    # Spotify client
-    sp = get_spotify_client()
+    sp = Spotify(auth_manager=auth_manager)
 
     # Fetch cached tracks & genres
     with st.spinner("Loading your liked songs and genres…"):
-        tracks, track_genres = cached_fetch_tracks_and_genres()
+        tracks = fetch_all_saved_tracks(sp)
+        track_genres = get_track_genres(sp, tracks)
+        tracks, track_genres = cached_fetch_tracks_and_genres(tracks, track_genres)
 
     # Count genres
     genre_counter = Counter()
